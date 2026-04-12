@@ -8,6 +8,7 @@ but routes all responses through OpenClaw (Clawson) for intelligence.
 """
 
 import json
+import time
 import asyncio
 import logging
 import uuid
@@ -15,6 +16,7 @@ from typing import Optional, Any, AsyncIterator
 from dataclasses import dataclass
 
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from reachy_mini_openclaw.config import config
 
@@ -119,6 +121,29 @@ class OpenClawBridge:
             return "ws://" + url
         return url
 
+    @staticmethod
+    def _connect_error_is_pairing_pending(error: dict[str, Any]) -> bool:
+        """True when the gateway rejected connect until an operator approves device pairing."""
+        code = str(error.get("code") or "").upper()
+        msg = str(error.get("message") or "").lower()
+        details = error.get("details") or {}
+        if not isinstance(details, dict):
+            details = {}
+        dcode = str(details.get("code") or "").upper()
+        reason = str(details.get("reason") or "").lower()
+        if code == "NOT_PAIRED" or dcode == "PAIRING_REQUIRED":
+            return True
+        if "pairing" in msg or "not paired" in msg or "pairing" in reason:
+            return True
+        return False
+
+    @staticmethod
+    def _connection_closed_is_pairing(exc: BaseException) -> bool:
+        if not isinstance(exc, ConnectionClosed):
+            return False
+        reason = (exc.reason or "").lower()
+        return "pairing" in reason
+
     # ------------------------------------------------------------------
     # Connection lifecycle
     # ------------------------------------------------------------------
@@ -126,17 +151,106 @@ class OpenClawBridge:
     async def connect(self) -> bool:
         """Connect to the OpenClaw gateway and authenticate.
 
+        When device pairing is required (typical for LAN), the gateway closes the
+        socket with ``NOT_PAIRED`` / "pairing required". We poll and retry until
+        an operator approves in the gateway UI (or timeout).
+
         Returns:
             True if connection successful, False otherwise
         """
+        import os
+
+        wait_sec = float(os.environ.get("OPENCLAW_PAIRING_WAIT_SEC", "300"))
+        poll_sec = float(os.environ.get("OPENCLAW_PAIRING_POLL_SEC", "2"))
+        deadline = time.monotonic() + max(5.0, wait_sec)
+        attempt = 0
+
         logger.info(
             "Connecting to OpenClaw at %s (token: %s)",
             self.gateway_url,
             "set" if self.gateway_token else "not set",
         )
+
+        while time.monotonic() < deadline:
+            if attempt > 0:
+                delay = min(poll_sec, max(0.25, deadline - time.monotonic()))
+                await asyncio.sleep(delay)
+            attempt += 1
+            status = await self._connect_handshake_attempt()
+            if status == "connected":
+                return True
+            if status == "pairing_required":
+                left = max(0.0, deadline - time.monotonic())
+                logger.info(
+                    "OpenClaw device pairing still pending — approve ClawBody (Reachy Mini) in the "
+                    "gateway (same requestId in logs means the gateway has not cleared that request "
+                    "yet). Retrying every %.0fs for up to %.0fs more (this is a client retry budget, "
+                    "not a countdown to approve).",
+                    poll_sec,
+                    left,
+                )
+                continue
+            return False
+
+        logger.error(
+            "OpenClaw connect timed out after %.0fs waiting for device pairing approval",
+            wait_sec,
+        )
+        await self._close_ws()
+        return False
+
+    async def _recv_until_connect_challenge(self, deadline: float) -> dict[str, Any]:
+        """Read frames until ``connect.challenge`` (gateways may emit other events first)."""
+        while time.monotonic() < deadline:
+            raw = await asyncio.wait_for(
+                self._ws.recv(),
+                timeout=max(0.25, deadline - time.monotonic()),
+            )
+            msg = json.loads(raw)
+            if msg.get("type") == "event" and msg.get("event") == "connect.challenge":
+                return msg
+            logger.debug(
+                "OpenClaw ignoring pre-challenge frame type=%s event=%s",
+                msg.get("type"),
+                msg.get("event"),
+            )
+        raise TimeoutError("connect.challenge not received")
+
+    async def _recv_until_connect_result(self, req_id: str, deadline: float) -> dict[str, Any]:
+        """Read frames until the ``connect`` response for ``req_id``."""
+        while time.monotonic() < deadline:
+            try:
+                raw = await asyncio.wait_for(
+                    self._ws.recv(),
+                    timeout=max(0.25, deadline - time.monotonic()),
+                )
+            except ConnectionClosed:
+                raise
+            msg = json.loads(raw)
+            if isinstance(msg, dict) and msg.get("type") == "res" and msg.get("id") == req_id:
+                return msg
+            if msg.get("type") == "event" and msg.get("event") == "device.pair.resolved":
+                pl = msg.get("payload") or {}
+                logger.info(
+                    "OpenClaw device.pair.resolved decision=%s deviceId=%s requestId=%s",
+                    pl.get("decision"),
+                    pl.get("deviceId"),
+                    pl.get("requestId"),
+                )
+                continue
+            logger.debug(
+                "OpenClaw while awaiting connect res: type=%s id=%s",
+                msg.get("type"),
+                msg.get("id"),
+            )
+        raise TimeoutError("connect response not received")
+
+    async def _connect_handshake_attempt(self) -> str:
+        """One WebSocket open + connect handshake. Returns ``connected``, ``pairing_required``, or ``failed``."""
+        from reachy_mini_openclaw import openclaw_device_identity as odi
+
+        await self._close_ws()
         try:
-            # Build origin header from the gateway URL so the control-UI
-            # origin check accepts programmatic WebSocket clients.
             origin = self.gateway_url.replace("ws://", "http://").replace("wss://", "https://")
             self._ws = await websockets.connect(
                 self.gateway_url,
@@ -146,63 +260,183 @@ class OpenClawBridge:
                 close_timeout=5,
             )
 
-            # 1. Receive challenge
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
-            challenge = json.loads(raw)
-            if challenge.get("event") != "connect.challenge":
-                logger.warning("Unexpected first frame: %s", challenge.get("event"))
+            chal_deadline = time.monotonic() + 15.0
+            try:
+                challenge = await self._recv_until_connect_challenge(chal_deadline)
+            except TimeoutError:
+                logger.error("Timed out waiting for OpenClaw connect.challenge")
+                await self._close_ws()
+                return "failed"
 
-            # 2. Send connect request
+            challenge_payload = challenge.get("payload") or {}
+            nonce = challenge_payload.get("nonce")
+            if not nonce:
+                logger.error("OpenClaw connect.challenge missing nonce; cannot sign device identity")
+                await self._close_ws()
+                return "failed"
+
             req_id = str(uuid.uuid4())
-            connect_req = {
-                "type": "req",
-                "id": req_id,
-                "method": "connect",
-                "params": {
-                    "minProtocol": PROTOCOL_VERSION,
-                    "maxProtocol": PROTOCOL_VERSION,
-                    "auth": {"token": self.gateway_token} if self.gateway_token else {},
-                    "client": {
-                        "id": "openclaw-control-ui",
-                        "version": "1.0.0",
-                        "platform": "linux",
-                        "mode": "webchat",
-                    },
-                    "role": "operator",
-                    "scopes": ["chat", "operator.write", "operator.read"],
-                },
+            scopes = [
+                "operator.read",
+                "operator.write",
+                "operator.admin",
+            ]
+            client_block = {
+                "id": "gateway-client",
+                "version": "1.0.0",
+                "platform": "linux",
+                "mode": "backend",
+                "displayName": "ClawBody (Reachy Mini)",
+                "deviceFamily": "reachy_mini",
             }
+            auth: dict[str, str] = {}
+            if self.gateway_token:
+                auth["token"] = self.gateway_token
+            id_path = odi.default_identity_path()
+            extra_dt = (config.OPENCLAW_DEVICE_TOKEN or "").strip()
+            if not extra_dt:
+                extra_dt = (odi.load_stored_device_token(id_path) or "").strip()
+            if extra_dt:
+                auth["deviceToken"] = extra_dt
+
+            params: dict[str, Any] = {
+                "minProtocol": PROTOCOL_VERSION,
+                "maxProtocol": PROTOCOL_VERSION,
+                "client": client_block,
+                "role": "operator",
+                "scopes": scopes,
+                "caps": [],
+                "auth": auth,
+                "locale": "en-US",
+                "userAgent": "clawbody/reachy-mini",
+            }
+
+            if not odi.device_disabled():
+                try:
+                    priv, device_id = odi.load_or_create_identity(id_path)
+                    logger.info(
+                        "OpenClaw device identity deviceId=%s… (identity file %s)",
+                        device_id[:12],
+                        id_path,
+                    )
+                    signed_at_ms = int(time.time() * 1000)
+                    # v3 payload must use the same credential string as the gateway's
+                    # resolveSignatureToken: shared token first, else device token.
+                    sig_token = auth.get("token") or auth.get("deviceToken") or ""
+                    payload_v3 = odi.build_device_auth_payload_v3(
+                        device_id=device_id,
+                        client_id=client_block["id"],
+                        client_mode=client_block["mode"],
+                        role="operator",
+                        scopes=scopes,
+                        signed_at_ms=signed_at_ms,
+                        token=sig_token,
+                        nonce=str(nonce),
+                        platform=client_block.get("platform"),
+                        device_family=client_block.get("deviceFamily"),
+                    )
+                    signature = odi.sign_device_payload(priv, payload_v3)
+                    public_key_b64url = odi.public_key_raw_b64url(priv)
+                    params["device"] = {
+                        "id": device_id,
+                        "publicKey": public_key_b64url,
+                        "signature": signature,
+                        "signedAt": signed_at_ms,
+                        "nonce": str(nonce),
+                    }
+                except Exception as e:
+                    logger.error(
+                        "OpenClaw device identity failed (%s). Install cryptography>=42 "
+                        "or set OPENCLAW_DISABLE_DEVICE_IDENTITY=1 for legacy gateways.",
+                        e,
+                    )
+                    await self._close_ws()
+                    return "failed"
+            else:
+                logger.warning(
+                    "OPENCLAW_DISABLE_DEVICE_IDENTITY is set; connect may lack operator scopes on modern gateways"
+                )
+
+            connect_req = {"type": "req", "id": req_id, "method": "connect", "params": params}
             await self._ws.send(json.dumps(connect_req))
 
-            # 3. Read hello response
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
-            hello = json.loads(raw)
+            res_deadline = time.monotonic() + 20.0
+            try:
+                hello = await self._recv_until_connect_result(req_id, res_deadline)
+            except ConnectionClosed as e:
+                if self._connection_closed_is_pairing(e):
+                    logger.warning("OpenClaw closed socket before connect res: %s", e.reason)
+                    await self._close_ws()
+                    return "pairing_required"
+                raise
+            except TimeoutError:
+                logger.error("Timed out waiting for OpenClaw connect response")
+                await self._close_ws()
+                return "failed"
 
             if hello.get("ok"):
                 self._connected = True
                 payload = hello.get("payload", {})
                 server = payload.get("server", {})
                 self._conn_id = server.get("connId")
+                hello_auth = payload.get("auth") or {}
+                granted = (
+                    payload.get("scopes")
+                    or payload.get("grantedScopes")
+                    or hello_auth.get("scopes")
+                )
+                if granted is not None:
+                    logger.info("OpenClaw granted scopes: %s", granted)
+                dtok = hello_auth.get("deviceToken")
+                if dtok and not odi.device_disabled():
+                    odi.maybe_store_device_token(odi.default_identity_path(), dtok)
                 logger.info(
                     "Connected to OpenClaw gateway (server=%s, connId=%s)",
                     server.get("host", "?"),
                     self._conn_id,
                 )
-                # Start background listener
                 self._listener_task = asyncio.create_task(
                     self._listen_loop(), name="openclaw-ws-listener"
                 )
-                return True
-            else:
-                err = hello.get("error", {})
-                logger.error(
-                    "OpenClaw connect failed: %s - %s",
+                return "connected"
+
+            err = hello.get("error", {}) or {}
+            if self._connect_error_is_pairing_pending(err):
+                details = err.get("details") if isinstance(err.get("details"), dict) else {}
+                rid = details.get("requestId") if isinstance(details, dict) else None
+                logger.warning(
+                    "OpenClaw connect: pairing required (%s) — approve this device in the gateway "
+                    "(requestId=%s). If you already approved: (1) OPENCLAW_TOKEN on the robot must "
+                    "match gateway.auth.token in openclaw.json, not gateway.remote.token; "
+                    "(2) approve the pending row whose deviceId matches the identity log line above; "
+                    "(3) remove stale lastDeviceToken from the identity JSON or clear "
+                    "OPENCLAW_DEVICE_TOKEN if reconnect still fails; (4) on the gateway host run "
+                    "`openclaw devices list` / `openclaw devices approve` if the UI did not persist. "
+                    "details=%s",
                     err.get("code"),
-                    err.get("message"),
+                    rid or "?",
+                    err.get("details"),
                 )
                 await self._close_ws()
-                return False
+                return "pairing_required"
 
+            logger.error(
+                "OpenClaw connect failed: %s - %s details=%s",
+                err.get("code"),
+                err.get("message"),
+                err.get("details"),
+            )
+            await self._close_ws()
+            return "failed"
+
+        except ConnectionClosed as e:
+            if self._connection_closed_is_pairing(e):
+                logger.warning("OpenClaw WebSocket closed during handshake: %s", e.reason)
+                await self._close_ws()
+                return "pairing_required"
+            logger.error("OpenClaw WebSocket closed during handshake: %s", e)
+            await self._close_ws()
+            return "failed"
         except Exception as e:
             logger.error(
                 "Failed to connect to OpenClaw gateway: %s (%s)",
@@ -210,7 +444,7 @@ class OpenClawBridge:
                 type(e).__name__,
             )
             await self._close_ws()
-            return False
+            return "failed"
 
     async def disconnect(self) -> None:
         """Disconnect from the gateway."""

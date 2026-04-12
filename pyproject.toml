@@ -45,6 +45,7 @@ dependencies = [
     
     # OpenClaw gateway client (WebSocket protocol)
     "websockets>=12.0",
+    "cryptography>=42.0.0",
     
     # Gradio UI
     "gradio>=4.0.0",

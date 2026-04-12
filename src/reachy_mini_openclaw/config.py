@@ -4,15 +4,13 @@ Handles environment variables and configuration settings for the application.
 """
 
 import os
-from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-from dotenv import load_dotenv
+from reachy_mini_openclaw.env_bootstrap import load_dotenv_for_app
 
-# Load environment variables from .env file
-_project_root = Path(__file__).parent.parent.parent
-load_dotenv(_project_root / ".env")
+# Same default discovery as main; if main() already applied --env-file, values stay set.
+load_dotenv_for_app(override=False)
 
 
 @dataclass
@@ -31,6 +29,8 @@ class Config:
     # Session key for OpenClaw - uses "main" to share context with WhatsApp and other channels
     # Format: agent:<agent_id>:<session_key>, but we only need the session key part here
     OPENCLAW_SESSION_KEY: str = field(default_factory=lambda: os.getenv("OPENCLAW_SESSION_KEY", "main"))
+    # Optional: gateway-issued device token (after pairing) to speed up reconnects; see OpenClaw docs.
+    OPENCLAW_DEVICE_TOKEN: Optional[str] = field(default_factory=lambda: os.getenv("OPENCLAW_DEVICE_TOKEN"))
     
     # Robot Configuration
     ROBOT_NAME: Optional[str] = field(default_factory=lambda: os.getenv("ROBOT_NAME"))

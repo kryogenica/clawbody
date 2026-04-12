@@ -28,9 +28,10 @@ from typing import Any, Optional
 
 from dotenv import load_dotenv
 
-# Load environment from project root (override=True ensures .env takes precedence)
-_project_root = Path(__file__).parent.parent.parent
-load_dotenv(_project_root / ".env", override=True)
+from reachy_mini_openclaw.env_bootstrap import load_dotenv_for_app
+
+# Default discovery (cwd walk-up, then editable layout). --env-file overrides in main().
+load_dotenv_for_app(override=True)
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +78,18 @@ Examples:
 
     # Use different OpenClaw gateway
     clawbody --gateway-url http://192.168.1.100:18790
+
+    # Alternate env file (same keys as .env.example)
+    clawbody --env-file ~/secrets/clawbody.env
         """
     )
     
+    parser.add_argument(
+        "--env-file",
+        type=Path,
+        metavar="PATH",
+        help="Load environment variables from this file (overrides default .env discovery)",
+    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -544,7 +554,14 @@ def main() -> None:
     """Main entry point."""
     args = parse_args()
     setup_logging(args.debug)
-    
+
+    if args.env_file:
+        env_path = args.env_file.expanduser().resolve()
+        if not env_path.is_file():
+            logger.error("Env file not found or not a file: %s", env_path)
+            sys.exit(2)
+        load_dotenv(env_path, override=True)
+
     # Set custom profile if specified
     if args.profile:
         from reachy_mini_openclaw.config import set_custom_profile
