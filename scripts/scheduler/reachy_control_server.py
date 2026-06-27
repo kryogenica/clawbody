@@ -21,7 +21,6 @@ import json
 import socket
 import threading
 import time
-import urllib.error
 import urllib.request
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer

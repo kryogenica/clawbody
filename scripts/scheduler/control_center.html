@@ -39,13 +39,6 @@
     color:var(--text);border-radius:8px;padding:9px 10px;width:100%}
   .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
   h2{font-size:15px;margin:0 0 14px;color:var(--text)}
-  table{width:100%;border-collapse:collapse;font-size:14px}
-  th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--border)}
-  th{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
-  .tag{font-size:11px;padding:2px 8px;border-radius:20px;font-weight:600}
-  .tag.on{background:rgba(63,185,80,.15);color:var(--on)}
-  .tag.off{background:rgba(248,81,73,.15);color:var(--off)}
-  .tag.muted{background:var(--panel2);color:var(--muted)}
   .log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;
     color:var(--muted);max-height:170px;overflow:auto;white-space:pre-wrap}
   .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
@@ -53,6 +46,45 @@
     border-radius:9px;opacity:0;transition:.2s;pointer-events:none}
   .toast.show{opacity:1}
   .muted{color:var(--muted)}
+
+  /* weekly calendar */
+  .cal-head{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+  .cal-head h2{margin:0}
+  .cal-nav{display:flex;align-items:center;gap:8px}
+  .cal-nav .range{color:var(--muted);font-size:13px;margin-left:4px}
+  .legend{display:flex;gap:18px;font-size:12px;color:var(--muted);margin-bottom:12px;flex-wrap:wrap}
+  .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:-1px;margin-right:6px}
+  .legend i.on{background:rgba(63,185,80,.30);border:1px solid var(--on)}
+  .legend i.off{background:var(--off)}
+  .cal{border:1px solid var(--border);border-radius:10px;overflow:hidden}
+  .cal-scroll{max-height:600px;overflow:auto}
+  .cal-grid{display:grid;grid-template-columns:52px repeat(7,1fr);grid-template-rows:auto var(--dpx);
+    position:relative;min-width:600px}
+  .cal-corner{position:sticky;top:0;left:0;z-index:4;background:var(--panel);border-bottom:1px solid var(--border)}
+  .cal-dayhead{position:sticky;top:0;z-index:3;background:var(--panel);border-bottom:1px solid var(--border);
+    border-left:1px solid var(--border);text-align:center;padding:6px 2px}
+  .cal-dayhead .wd{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  .cal-dayhead .dn{font-size:15px;font-weight:600;margin-top:3px;width:24px;height:24px;line-height:24px;
+    border-radius:50%;display:inline-block}
+  .cal-dayhead.today .dn{color:#fff;background:var(--accent)}
+  .cal-gutter{position:relative;background:var(--panel)}
+  .cal-gutter .hr{position:absolute;right:6px;font-size:10px;color:var(--muted);transform:translateY(-6px)}
+  .cal-col{position:relative;border-left:1px solid var(--border);
+    background-image:repeating-linear-gradient(to bottom,transparent 0,transparent calc(var(--hpx) - 1px),
+      var(--border) calc(var(--hpx) - 1px),var(--border) var(--hpx))}
+  .cal-col.today{background-color:rgba(47,129,247,.05)}
+  .on-block{position:absolute;left:0;right:0;background:rgba(63,185,80,.16);border-left:3px solid var(--on)}
+  .ev{position:absolute;left:3px;right:3px;min-height:15px;border-radius:5px;padding:1px 5px;font-size:11px;
+    font-weight:600;color:#fff;overflow:hidden;cursor:pointer;white-space:nowrap;text-overflow:ellipsis;z-index:2}
+  .ev.on{background:var(--on)}
+  .ev.off{background:var(--off)}
+  .ev.disabled{opacity:.4;filter:grayscale(.4)}
+  .now-line{position:absolute;left:0;right:0;height:2px;background:#ff5252;z-index:3}
+  .now-line::before{content:"";position:absolute;left:-4px;top:-3px;width:8px;height:8px;border-radius:50%;background:#ff5252}
+  .cal-menu{position:fixed;z-index:50;background:var(--panel2);border:1px solid var(--border);border-radius:9px;
+    padding:10px 12px;min-width:170px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
+  .cal-menu .cal-menu-t{font-size:13px;font-weight:600;margin-bottom:2px}
+  .cal-menu .cal-menu-btns{display:flex;gap:8px;margin-top:10px}
 </style>
 </head>
 <body>
@@ -109,11 +141,20 @@
   </div>
 
   <div class="card">
-    <h2>Scheduled timers</h2>
-    <table>
-      <thead><tr><th>Action</th><th>When</th><th>App</th><th>Status</th><th></th></tr></thead>
-      <tbody id="timer-rows"><tr><td colspan="5" class="muted">Loading…</td></tr></tbody>
-    </table>
+    <div class="cal-head">
+      <h2>Scheduled timers</h2>
+      <div class="cal-nav">
+        <button class="btn-ghost btn-sm" id="cal-prev" title="Previous week">‹</button>
+        <button class="btn-ghost btn-sm" id="cal-today">This week</button>
+        <button class="btn-ghost btn-sm" id="cal-next" title="Next week">›</button>
+        <span class="range" id="cal-range">—</span>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="on"></i>ON — robot running (green continues until an OFF)</span>
+      <span><i class="off"></i>OFF — robot sleeps</span>
+    </div>
+    <div class="cal"><div class="cal-scroll"><div class="cal-grid" id="cal-grid"></div></div></div>
   </div>
 
   <div class="card">
@@ -133,8 +174,6 @@ async function api(path, method="GET", body){
   const r=await fetch(path,opt); return r.json().catch(()=>({}));
 }
 
-function setDot(el, up){el.className="dot "+(up?"on":"off");}
-
 async function refreshStatus(){
   let s; try{ s=await api("/api/status"); }catch(e){ return; }
   $("clock").textContent = s.now + (s.busy ? "  ·  working…" : "");
@@ -149,32 +188,153 @@ async function refreshStatus(){
   $("log").textContent = (s.log||[]).map(l=>l.ts+"  "+l.msg).join("\n") || "—";
 }
 
-async function refreshTimers(){
-  const d=await api("/api/timers"); const rows=$("timer-rows");
-  if(!d.timers || !d.timers.length){rows.innerHTML='<tr><td colspan="5" class="muted">No timers yet.</td></tr>';return;}
-  rows.innerHTML="";
-  for(const t of d.timers){
-    const tr=document.createElement("tr");
-    const when = t.kind==="daily" ? ("daily "+t.time) : ("once "+t.time.replace("T"," "));
-    let status = t.enabled ? '<span class="tag '+(t.action)+'">enabled</span>'
-                           : '<span class="tag muted">'+(t.fired?"fired":"off")+'</span>';
-    tr.innerHTML =
-      '<td><span class="tag '+t.action+'">'+(t.action==="on"?"ON":"OFF")+'</span>'+
-        (t.label?' '+t.label:'')+'</td>'+
-      '<td>'+when+'</td>'+
-      '<td class="muted">'+(t.action==="on"?t.app_name:"—")+'</td>'+
-      '<td>'+status+'</td>'+
-      '<td style="text-align:right;white-space:nowrap">'+
-        '<button class="btn-ghost btn-sm" data-tg="'+t.id+'" data-en="'+(t.enabled?0:1)+'">'+
-          (t.enabled?"Disable":"Enable")+'</button> '+
-        '<button class="btn-off btn-sm" data-del="'+t.id+'">Delete</button>'+
-      '</td>';
-    rows.appendChild(tr);
+/* ---- weekly calendar ------------------------------------------------------ */
+const HPX = 24;            // pixels per hour
+const DPX = HPX * 24;      // pixels per day column
+const DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+let lastTimers = [];
+let calWeekStart = startOfWeek(new Date());
+let menuOpen = false;
+
+function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,
+  c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function startOfWeek(d){const x=new Date(d.getFullYear(),d.getMonth(),d.getDate());x.setDate(x.getDate()-x.getDay());return x;}
+function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
+function pad2(n){return (n<10?"0":"")+n;}
+function fmtWhen(t){return t.kind==="daily" ? ("daily "+t.time) : ("once "+(t.time||"").replace("T"," "));}
+
+// Expand the configured timers into concrete dated events within the shown week.
+function buildEvents(timers, weekStart){
+  const weekEnd = addDays(weekStart,7);
+  const evs=[];
+  for(const t of timers){
+    if(t.kind==="daily"){
+      const p=(t.time||"0:0").split(":"); const hh=+p[0]||0, mm=+p[1]||0;
+      for(let d=0;d<7;d++){const when=addDays(weekStart,d); when.setHours(hh,mm,0,0);
+        evs.push({time:when,action:t.action,timer:t});}
+    } else {
+      const when=new Date(t.time);
+      if(!isNaN(when) && when>=weekStart && when<weekEnd)
+        evs.push({time:when,action:t.action,timer:t});
+    }
   }
-  rows.querySelectorAll("[data-del]").forEach(b=>b.onclick=async()=>{
-    await api("/api/timers/delete","POST",{id:b.dataset.del}); refreshTimers();});
-  rows.querySelectorAll("[data-tg]").forEach(b=>b.onclick=async()=>{
-    await api("/api/timers/toggle","POST",{id:b.dataset.tg,enabled:b.dataset.en==="1"});refreshTimers();});
+  return evs;
+}
+
+// Green = robot ON. An ON starts a green stretch that runs forward (even across
+// midnight) until an OFF ends it. OFF only terminates green; it never shades.
+function greenIntervals(evs, weekStart){
+  const weekEnd=addDays(weekStart,7);
+  const act=evs.filter(e=>e.timer.enabled!==false).sort((a,b)=>a.time-b.time);
+  const out=[]; let on=false, start=null;
+  for(const e of act){
+    if(e.action==="on"){ if(!on){on=true; start=e.time;} }
+    else { if(on){ out.push([start,e.time]); on=false; start=null; } }
+  }
+  if(on) out.push([start,weekEnd]);
+  return out;
+}
+
+function renderCal(){
+  const grid=$("cal-grid");
+  grid.style.setProperty("--hpx",HPX+"px");
+  grid.style.setProperty("--dpx",DPX+"px");
+  grid.innerHTML="";
+  const now=new Date(), todayKey=now.toDateString();
+
+  grid.appendChild(Object.assign(document.createElement("div"),{className:"cal-corner"}));
+  for(let d=0;d<7;d++){
+    const day=addDays(calWeekStart,d);
+    const h=document.createElement("div");
+    h.className="cal-dayhead"+(day.toDateString()===todayKey?" today":"");
+    h.innerHTML='<div class="wd">'+DOW[day.getDay()]+'</div><div class="dn">'+day.getDate()+'</div>';
+    grid.appendChild(h);
+  }
+  const gutter=document.createElement("div"); gutter.className="cal-gutter";
+  for(let h=1;h<24;h++){
+    const lab=document.createElement("div"); lab.className="hr";
+    lab.style.top=(h*HPX)+"px"; lab.textContent=pad2(h)+":00";
+    gutter.appendChild(lab);
+  }
+  grid.appendChild(gutter);
+
+  const evs=buildEvents(lastTimers, calWeekStart);
+  const greens=greenIntervals(evs, calWeekStart);
+  const cols=[];
+  for(let d=0;d<7;d++){
+    const day=addDays(calWeekStart,d), dayEnd=addDays(day,1);
+    const col=document.createElement("div");
+    col.className="cal-col"+(day.toDateString()===todayKey?" today":"");
+    for(const [s,e] of greens){
+      const segS=s>day?s:day, segE=e<dayEnd?e:dayEnd;
+      if(segE>segS){
+        const b=document.createElement("div"); b.className="on-block";
+        b.style.top=((segS-day)/3600000*HPX)+"px";
+        b.style.height=((segE-segS)/3600000*HPX)+"px";
+        col.appendChild(b);
+      }
+    }
+    if(day.toDateString()===todayKey){
+      const nl=document.createElement("div"); nl.className="now-line";
+      nl.style.top=((now.getHours()*60+now.getMinutes())/60*HPX)+"px";
+      col.appendChild(nl);
+    }
+    cols.push(col); grid.appendChild(col);
+  }
+
+  for(const ev of evs){
+    const d=Math.floor((ev.time - calWeekStart)/86400000);
+    if(d<0||d>6) continue;
+    const day=addDays(calWeekStart,d);
+    const disabled = ev.timer.enabled===false;
+    const chip=document.createElement("div");
+    chip.className="ev "+(ev.action==="on"?"on":"off")+(disabled?" disabled":"");
+    chip.style.top=Math.max(0,(ev.time-day)/3600000*HPX)+"px";
+    const tm=pad2(ev.time.getHours())+":"+pad2(ev.time.getMinutes());
+    const lbl=ev.timer.label ? " "+ev.timer.label : (ev.action==="on"?" ON":" OFF");
+    chip.textContent=tm+lbl;
+    chip.title=(ev.action==="on"?"ON":"OFF")+" "+tm+(ev.timer.label?" — "+ev.timer.label:"")+(disabled?" (disabled)":"");
+    chip.onclick=(e)=>{e.stopPropagation(); openMenu(e, ev.timer);};
+    cols[d].appendChild(chip);
+  }
+
+  const wkEnd=addDays(calWeekStart,6);
+  $("cal-range").textContent =
+    MONTHS[calWeekStart.getMonth()]+" "+calWeekStart.getDate()+" – "+
+    MONTHS[wkEnd.getMonth()]+" "+wkEnd.getDate()+", "+wkEnd.getFullYear();
+}
+
+function closeMenu(){const m=document.querySelector(".cal-menu"); if(m) m.remove(); menuOpen=false;}
+function openMenu(e, timer){
+  closeMenu(); menuOpen=true;
+  const m=document.createElement("div"); m.className="cal-menu";
+  m.onclick=ev=>ev.stopPropagation();
+  m.innerHTML=
+    '<div class="cal-menu-t">'+(timer.action==="on"?"ON":"OFF")+' · '+esc(fmtWhen(timer))+'</div>'+
+    (timer.label?'<div class="muted" style="font-size:12px">'+esc(timer.label)+'</div>':'')+
+    (timer.action==="on"?'<div class="muted" style="font-size:12px">app: '+esc(timer.app_name||"")+'</div>':'')+
+    '<div class="cal-menu-btns">'+
+      '<button class="btn-ghost btn-sm" data-act="toggle">'+(timer.enabled===false?"Enable":"Disable")+'</button>'+
+      '<button class="btn-off btn-sm" data-act="del">Delete</button>'+
+    '</div>';
+  document.body.appendChild(m);
+  const pad=8, r=m.getBoundingClientRect();
+  let x=e.clientX, y=e.clientY+10;
+  if(x+r.width+pad>innerWidth) x=innerWidth-r.width-pad;
+  if(y+r.height+pad>innerHeight) y=e.clientY-r.height-10;
+  m.style.left=Math.max(pad,x)+"px"; m.style.top=Math.max(pad,y)+"px";
+  m.querySelector('[data-act="del"]').onclick=async()=>{
+    await api("/api/timers/delete","POST",{id:timer.id}); closeMenu(); refreshTimers();};
+  m.querySelector('[data-act="toggle"]').onclick=async()=>{
+    await api("/api/timers/toggle","POST",{id:timer.id,enabled:timer.enabled===false}); closeMenu(); refreshTimers();};
+}
+document.addEventListener("click",()=>{ if(menuOpen) closeMenu(); });
+
+async function refreshTimers(){
+  const d=await api("/api/timers");
+  lastTimers = (d && d.timers) ? d.timers : [];
+  if(!menuOpen) renderCal();
 }
 
 $("btn-on").onclick=async()=>{const r=await api("/api/power/on","POST",{app_name:$("app-name").value});
@@ -186,6 +346,10 @@ $("t-kind").onchange=()=>{const daily=$("t-kind").value==="daily";
   $("t-time-label").textContent = daily?"Time (HH:MM)":"Date & time";
   $("t-time").placeholder = daily?"14:30":"2026-06-27T14:30";};
 $("t-action").onchange=()=>{$("t-app-wrap").style.display = $("t-action").value==="on"?"block":"none";};
+
+$("cal-prev").onclick=()=>{calWeekStart=addDays(calWeekStart,-7); renderCal();};
+$("cal-next").onclick=()=>{calWeekStart=addDays(calWeekStart,7); renderCal();};
+$("cal-today").onclick=()=>{calWeekStart=startOfWeek(new Date()); renderCal();};
 
 $("btn-add").onclick=async()=>{
   const body={action:$("t-action").value,kind:$("t-kind").value,time:$("t-time").value,
