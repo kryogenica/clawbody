@@ -118,6 +118,17 @@ def power_on(app_name: str = DEFAULT_APP) -> None:
         _busy = True
         try:
             log(f"POWER ON requested (app={app_name})")
+
+            # Skip if the robot is already on (an app is up).
+            existing = current_app()
+            if existing and existing.get("info") and existing.get("state") in ("running", "starting"):
+                running_name = existing.get("info", {}).get("name")
+                if running_name == app_name:
+                    log(f"already on: '{app_name}' is {existing.get('state')}; nothing to do")
+                else:
+                    log(f"already on: app '{running_name}' is {existing.get('state')}; leaving it (skip)")
+                return
+
             if daemon_state() != "running":
                 log("starting backend (wake_up=true)...")
                 daemon_request("POST", "/api/daemon/start?wake_up=true", timeout=60)
@@ -199,6 +210,11 @@ def scheduler_loop() -> None:
 
 
 def check_schedules() -> None:
+    # Re-read the system timezone each tick. The robot has no RTC, so at boot the
+    # timezone may still be wrong (geo-timezone.service sets it after the network is
+    # up). tzset() lets this long-running process pick up that change without a
+    # restart, so timers always evaluate against the correct local wall-clock time.
+    time.tzset()
     now = datetime.now()
     today = date.today().isoformat()
     hhmm = now.strftime("%H:%M")
@@ -482,8 +498,8 @@ PAGE_HTML = r"""<!doctype html>
         <input id="t-label" placeholder="e.g. Morning greet"/>
       </div>
     </div>
-    <div class="row" id="t-app-row" style="margin-top:12px">
-      <div style="flex:1;min-width:200px">
+    <div class="row" style="margin-top:12px">
+      <div id="t-app-wrap" style="flex:1;min-width:200px">
         <label>App (for ON timers)</label>
         <input id="t-app" value="reachy_mini_conversation_app"/>
       </div>
@@ -568,7 +584,7 @@ $("btn-off").onclick=async()=>{const r=await api("/api/power/off","POST",{});
 $("t-kind").onchange=()=>{const daily=$("t-kind").value==="daily";
   $("t-time-label").textContent = daily?"Time (HH:MM)":"Date & time";
   $("t-time").placeholder = daily?"14:30":"2026-06-27T14:30";};
-$("t-action").onchange=()=>{$("t-app-row").style.display = $("t-action").value==="on"?"flex":"none";};
+$("t-action").onchange=()=>{$("t-app-wrap").style.display = $("t-action").value==="on"?"block":"none";};
 
 $("btn-add").onclick=async()=>{
   const body={action:$("t-action").value,kind:$("t-kind").value,time:$("t-time").value,
