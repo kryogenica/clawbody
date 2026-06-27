@@ -10,7 +10,7 @@ Wants=network-online.target time-sync.target
 Type=simple
 User=pollen
 WorkingDirectory=/home/pollen/clawbody
-ExecStart=/usr/bin/python3 /home/pollen/clawbody/scripts/reachy_control_server.py
+ExecStart=/usr/bin/python3 /home/pollen/clawbody/scripts/scheduler/reachy_control_server.py
 Restart=always
 RestartSec=5
 

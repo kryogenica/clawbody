@@ -62,5 +62,5 @@ Thumbs.db
 uv.lock
 
 # Reachy control center runtime state (timers)
-scripts/control_state.json
-scripts/*.tmp
+scripts/scheduler/control_state.json
+scripts/scheduler/*.tmp
