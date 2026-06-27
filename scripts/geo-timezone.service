@@ -1,0 +1,16 @@
+[Unit]
+Description=Set system timezone from IP geolocation (Reachy Mini)
+Documentation=https://github.com/pollen-robotics
+Wants=network-online.target
+After=network-online.target NetworkManager-wait-online.service
+# NTP gives correct UTC; this aligns the local timezone to the robot's location.
+Before=time-sync.target
+
+[Service]
+Type=oneshot
+# The script retries internally while the network settles after boot.
+ExecStart=/usr/bin/python3 /home/pollen/clawbody/scripts/set_timezone_from_geoip.py
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target
