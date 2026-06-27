@@ -85,6 +85,14 @@
     padding:10px 12px;min-width:170px;box-shadow:0 8px 24px rgba(0,0,0,.5)}
   .cal-menu .cal-menu-t{font-size:13px;font-weight:600;margin-bottom:2px}
   .cal-menu .cal-menu-btns{display:flex;gap:8px;margin-top:10px}
+
+  /* day-of-week picker */
+  .dow-pick{display:flex;gap:6px;flex-wrap:wrap}
+  .dow-pick button{background:var(--panel2);border:1px solid var(--border);color:var(--muted);
+    border-radius:8px;padding:9px 0;width:46px;font-weight:600;font-size:13px;cursor:pointer}
+  .dow-pick button.sel{background:var(--accent);border-color:var(--accent);color:#fff}
+  .dow-quick{margin-top:8px;display:flex;gap:8px;flex-wrap:wrap}
+  input[type=date]{color-scheme:dark}
 </style>
 </head>
 <body>
@@ -120,7 +128,15 @@
       </div>
       <div>
         <label>Repeat</label>
-        <select id="t-kind"><option value="daily">Daily</option><option value="once">Once</option></select>
+        <select id="t-kind">
+          <option value="daily">Daily</option>
+          <option value="weekly">Weekly (pick days)</option>
+          <option value="once">Once</option>
+        </select>
+      </div>
+      <div id="t-date-wrap" style="display:none">
+        <label>Date</label>
+        <input id="t-date" type="date"/>
       </div>
       <div>
         <label id="t-time-label">Time (HH:MM)</label>
@@ -131,6 +147,26 @@
         <input id="t-label" placeholder="e.g. Morning greet"/>
       </div>
     </div>
+
+    <div id="t-days-wrap" style="display:none;margin-top:12px">
+      <label>Days of week</label>
+      <div class="dow-pick" id="t-days">
+        <button type="button" data-d="0">Sun</button>
+        <button type="button" data-d="1">Mon</button>
+        <button type="button" data-d="2">Tue</button>
+        <button type="button" data-d="3">Wed</button>
+        <button type="button" data-d="4">Thu</button>
+        <button type="button" data-d="5">Fri</button>
+        <button type="button" data-d="6">Sat</button>
+      </div>
+      <div class="dow-quick">
+        <button type="button" class="btn-ghost btn-sm" id="t-days-all">All days (= daily)</button>
+        <button type="button" class="btn-ghost btn-sm" id="t-days-wd">Weekdays</button>
+        <button type="button" class="btn-ghost btn-sm" id="t-days-we">Weekend</button>
+        <button type="button" class="btn-ghost btn-sm" id="t-days-clear">Clear</button>
+      </div>
+    </div>
+
     <div class="row" style="margin-top:12px">
       <div id="t-app-wrap" style="flex:1;min-width:200px">
         <label>App (for ON timers)</label>
@@ -202,17 +238,26 @@ function esc(s){return (s==null?"":String(s)).replace(/[&<>"']/g,
 function startOfWeek(d){const x=new Date(d.getFullYear(),d.getMonth(),d.getDate());x.setDate(x.getDate()-x.getDay());return x;}
 function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
 function pad2(n){return (n<10?"0":"")+n;}
-function fmtWhen(t){return t.kind==="daily" ? ("daily "+t.time) : ("once "+(t.time||"").replace("T"," "));}
+function fmtWhen(t){
+  if(t.kind==="daily") return "daily "+t.time;
+  if(t.kind==="weekly") return (t.days||[]).map(d=>DOW[d]).join(",")+" "+t.time;
+  return "once "+(t.time||"").replace("T"," ");
+}
 
 // Expand the configured timers into concrete dated events within the shown week.
 function buildEvents(timers, weekStart){
   const weekEnd = addDays(weekStart,7);
   const evs=[];
   for(const t of timers){
-    if(t.kind==="daily"){
+    if(t.kind==="daily" || t.kind==="weekly"){
+      const days = t.kind==="weekly" ? (t.days||[]) : [0,1,2,3,4,5,6];
       const p=(t.time||"0:0").split(":"); const hh=+p[0]||0, mm=+p[1]||0;
-      for(let d=0;d<7;d++){const when=addDays(weekStart,d); when.setHours(hh,mm,0,0);
-        evs.push({time:when,action:t.action,timer:t});}
+      for(let d=0;d<7;d++){
+        const when=addDays(weekStart,d);
+        if(!days.includes(when.getDay())) continue;
+        when.setHours(hh,mm,0,0);
+        evs.push({time:when,action:t.action,timer:t});
+      }
     } else {
       const when=new Date(t.time);
       if(!isNaN(when) && when>=weekStart && when<weekEnd)
@@ -342,20 +387,47 @@ $("btn-on").onclick=async()=>{const r=await api("/api/power/on","POST",{app_name
 $("btn-off").onclick=async()=>{const r=await api("/api/power/off","POST",{});
   toast(r.ok?"Powering off…":("Error: "+(r.error||"failed"))); setTimeout(refreshStatus,800);};
 
-$("t-kind").onchange=()=>{const daily=$("t-kind").value==="daily";
-  $("t-time-label").textContent = daily?"Time (HH:MM)":"Date & time";
-  $("t-time").placeholder = daily?"14:30":"2026-06-27T14:30";};
+function updateKindUI(){
+  const k=$("t-kind").value;
+  $("t-date-wrap").style.display = k==="once"   ? "block":"none";
+  $("t-days-wrap").style.display = k==="weekly" ? "block":"none";
+}
+$("t-kind").onchange=updateKindUI;
 $("t-action").onchange=()=>{$("t-app-wrap").style.display = $("t-action").value==="on"?"block":"none";};
+
+const daysBox=$("t-days");
+daysBox.querySelectorAll("button").forEach(b=>b.onclick=()=>b.classList.toggle("sel"));
+function setDays(arr){daysBox.querySelectorAll("button").forEach(b=>b.classList.toggle("sel",arr.includes(+b.dataset.d)));}
+$("t-days-all").onclick=()=>setDays([0,1,2,3,4,5,6]);
+$("t-days-wd").onclick=()=>setDays([1,2,3,4,5]);
+$("t-days-we").onclick=()=>setDays([0,6]);
+$("t-days-clear").onclick=()=>setDays([]);
+updateKindUI();
 
 $("cal-prev").onclick=()=>{calWeekStart=addDays(calWeekStart,-7); renderCal();};
 $("cal-next").onclick=()=>{calWeekStart=addDays(calWeekStart,7); renderCal();};
 $("cal-today").onclick=()=>{calWeekStart=startOfWeek(new Date()); renderCal();};
 
 $("btn-add").onclick=async()=>{
-  const body={action:$("t-action").value,kind:$("t-kind").value,time:$("t-time").value,
-    label:$("t-label").value,app_name:$("t-app").value};
+  const kind=$("t-kind").value;
+  const time=$("t-time").value.trim();
+  const body={action:$("t-action").value,kind,label:$("t-label").value,app_name:$("t-app").value};
+  if(kind==="once"){
+    const dt=$("t-date").value;
+    if(!dt){toast("Pick a date"); return;}
+    if(!time){toast("Enter a time (HH:MM)"); return;}
+    body.time = dt+"T"+time;
+  }else if(kind==="weekly"){
+    const days=[...daysBox.querySelectorAll("button.sel")].map(b=>+b.dataset.d);
+    if(!days.length){toast("Pick at least one day"); return;}
+    body.time = time;
+    if(days.length===7){ body.kind="daily"; }   // all days == plain daily
+    else { body.days=days; }
+  }else{
+    body.time = time;
+  }
   const r=await api("/api/timers/add","POST",body);
-  if(r.ok){toast("Timer added"); $("t-time").value=""; $("t-label").value=""; refreshTimers();}
+  if(r.ok){toast("Timer added"); $("t-time").value=""; $("t-label").value=""; setDays([]); refreshTimers();}
   else toast("Error: "+(r.error||"failed"));
 };
 

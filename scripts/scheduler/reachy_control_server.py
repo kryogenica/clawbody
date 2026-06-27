@@ -4,7 +4,7 @@
 A small, dependency-free web app (stdlib only) that lets you:
   * See live robot status (daemon backend + currently running app)
   * Power the robot ON (wake + start an app) or OFF (stop app + sleep)
-  * Create/delete scheduled timers (one-shot or daily) for ON and OFF
+  * Create/delete scheduled timers (one-shot, daily, or specific weekdays) for ON and OFF
 
 It drives the Reachy Mini daemon REST API on localhost:8000 (the same backend
 the :8000 dashboard uses). An internal scheduler thread fires timers, so they
@@ -72,6 +72,14 @@ def save_state(state: dict) -> None:
     tmp = STATE_FILE.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_FILE)
+
+
+def hhmm_norm(s: str) -> str:
+    """Zero-pad a wall-clock string so 'H:MM' compares equal to strftime('%H:%M')."""
+    try:
+        return datetime.strptime(s, "%H:%M").strftime("%H:%M")
+    except (ValueError, TypeError):
+        return s
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +226,7 @@ def check_schedules() -> None:
     now = datetime.now()
     today = date.today().isoformat()
     hhmm = now.strftime("%H:%M")
+    dow = (now.weekday() + 1) % 7  # 0=Sun .. 6=Sat (matches stored weekly days)
 
     to_fire: list[dict] = []
     with _state_lock:
@@ -230,7 +239,16 @@ def check_schedules() -> None:
                 continue
             fire = False
             if t["kind"] == "daily":
-                if t["time"] == hhmm and t.get("last_run_date") != today:
+                if hhmm_norm(t["time"]) == hhmm and t.get("last_run_date") != today:
+                    fire = True
+                    t["last_run_date"] = today
+                    changed = True
+            elif t["kind"] == "weekly":
+                if (
+                    dow in t.get("days", [])
+                    and hhmm_norm(t["time"]) == hhmm
+                    and t.get("last_run_date") != today
+                ):
                     fire = True
                     t["last_run_date"] = today
                     changed = True
@@ -347,7 +365,6 @@ class Handler(BaseHTTPRequestHandler):
             "control_bus_up": port_open(PORT_CONTROL_BUS),
             "app_ui_up": port_open(PORT_APP_UI),
             "busy": _busy,
-            "default_app": DEFAULT_APP,
             "log": list(reversed(_log[-15:])),
         }
 
@@ -355,18 +372,34 @@ class Handler(BaseHTTPRequestHandler):
         action = body.get("action")
         kind = body.get("kind")
         tval = (body.get("time") or "").strip()
-        if action not in ("on", "off") or kind not in ("once", "daily") or not tval:
+        if action not in ("on", "off") or kind not in ("once", "daily", "weekly") or not tval:
             return {"ok": False, "error": "invalid timer fields"}
-        if kind == "daily":
+
+        days: list[int] | None = None
+        if kind in ("daily", "weekly"):
             try:
-                datetime.strptime(tval, "%H:%M")
+                tval = datetime.strptime(tval, "%H:%M").strftime("%H:%M")
             except ValueError:
-                return {"ok": False, "error": "daily time must be HH:MM"}
-        else:
+                return {"ok": False, "error": "time must be HH:MM"}
+            if kind == "weekly":
+                raw = body.get("days")
+                if not isinstance(raw, list):
+                    return {"ok": False, "error": "weekly timer needs days"}
+                try:
+                    days = sorted({int(d) for d in raw if not isinstance(d, bool) and 0 <= int(d) <= 6})
+                except (TypeError, ValueError):
+                    return {"ok": False, "error": "invalid days"}
+                if not days:
+                    return {"ok": False, "error": "pick at least one weekday"}
+                if len(days) == 7:  # every day selected == plain daily
+                    kind = "daily"
+                    days = None
+        else:  # once
             try:
                 datetime.fromisoformat(tval)
             except ValueError:
                 return {"ok": False, "error": "once time must be YYYY-MM-DDTHH:MM"}
+
         timer = {
             "id": uuid4().hex,
             "action": action,
@@ -376,6 +409,8 @@ class Handler(BaseHTTPRequestHandler):
             "label": (body.get("label") or "").strip(),
             "enabled": True,
         }
+        if days is not None:
+            timer["days"] = days
         with _state_lock:
             state = load_state()
             state.setdefault("timers", []).append(timer)
