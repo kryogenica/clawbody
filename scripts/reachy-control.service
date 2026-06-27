@@ -1,0 +1,16 @@
+[Unit]
+Description=Reachy Mini Control Center (web UI + timer scheduler on :1991)
+Documentation=https://github.com/pollen-robotics
+After=network-online.target reachy-mini-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pollen
+WorkingDirectory=/home/pollen/clawbody
+ExecStart=/usr/bin/python3 /home/pollen/clawbody/scripts/reachy_control_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -60,3 +60,7 @@ Thumbs.db
 
 # Package manager
 uv.lock
+
+# Reachy control center runtime state (timers)
+scripts/control_state.json
+scripts/*.tmp
