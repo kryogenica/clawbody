@@ -77,9 +77,9 @@ def write_config(work: Path, oww_repo: Path) -> Path:
         target_recall: {TARGET_RECALL}
 
         output_dir: "{out_dir}"
-        # Room-impulse-responses + background audio for augmentation (downloaded below)
-        rir_paths:
-          - "{work / 'mit_rirs'}"
+        # Background audio for augmentation (downloaded below). RIRs are optional;
+        # keep this empty in the automated script for portability.
+        rir_paths: []
         background_paths:
           - "{work / 'audioset_16k'}"
           - "{work / 'fma'}"
@@ -101,11 +101,14 @@ def write_config(work: Path, oww_repo: Path) -> Path:
 
 
 def fetch_assets(work: Path, oww_repo: Path) -> None:
-    """Clone piper-sample-generator and download the datasets the config expects.
+    """Clone piper-sample-generator and download training assets.
 
-    openWakeWord ships a helper that downloads MIT RIRs, AudioSet/FMA backgrounds,
-    the ACAV100M negative features, and a validation set. We reuse it so the paths
-    in the YAML resolve. (This is the same data the official notebook pulls.)
+    NOTE: older openWakeWord examples referenced `openwakeword.data.download_training_data`,
+    but that helper is not present in current releases. We explicitly download the
+    same key assets used in the official notebook:
+      - ACAV100M negative feature mmap
+      - false-positive validation feature mmap
+      - small 16 kHz background clip corpora (AudioSet + FMA streaming samples)
     """
     if not (work / "piper-sample-generator").exists():
         sh(["git", "clone", "https://github.com/rhasspy/piper-sample-generator",
@@ -114,12 +117,45 @@ def fetch_assets(work: Path, oww_repo: Path) -> None:
         sh(["wget", "-O", str(work / "piper-sample-generator" / "models" / "en_US-libritts_r-medium.pt"),
             "https://github.com/rhasspy/piper-sample-generator/releases/download/v2.0.0/en_US-libritts_r-medium.pt"])
 
-    # openWakeWord bundles a data-download utility used by the training notebook.
+    # Precomputed negative features and validation features
+    sh([
+        "wget",
+        "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/openwakeword_features_ACAV100M_2000_hrs_16bit.npy",
+        "-O",
+        str(work / "openwakeword_features_ACAV100M_2000_hrs_16bit.npy"),
+    ])
+    sh([
+        "wget",
+        "https://huggingface.co/datasets/davidscripka/openwakeword_features/resolve/main/validation_set_features.npy",
+        "-O",
+        str(work / "validation_set_features.npy"),
+    ])
+
+    # Build modest background corpora from HF streaming datasets.
     sh([sys.executable, "-c", textwrap.dedent(f"""
-        import os
-        os.chdir(r"{work}")
-        from openwakeword.data import download_training_data
-        download_training_data()  # MIT RIRs, audioset_16k, fma, ACAV100M features, validation set
+        from pathlib import Path
+        import datasets
+        import soundfile as sf
+
+        work = Path(r"{work}")
+        out_a = work / "audioset_16k"
+        out_f = work / "fma"
+        out_a.mkdir(parents=True, exist_ok=True)
+        out_f.mkdir(parents=True, exist_ok=True)
+
+        # AudioSet (streaming): grab a few hundred clips for augmentation.
+        ds_a = datasets.load_dataset("agkphysics/AudioSet", split="train", streaming=True)
+        ds_a = iter(ds_a.cast_column("audio", datasets.Audio(sampling_rate=16000)))
+        for i in range(400):
+            row = next(ds_a)
+            sf.write(out_a / f"audioset_{{i:04d}}.wav", row["audio"]["array"], 16000)
+
+        # FMA (streaming): grab additional music/background clips.
+        ds_f = datasets.load_dataset("rudraml/fma", name="small", split="train", streaming=True)
+        ds_f = iter(ds_f.cast_column("audio", datasets.Audio(sampling_rate=16000)))
+        for i in range(400):
+            row = next(ds_f)
+            sf.write(out_f / f"fma_{{i:04d}}.wav", row["audio"]["array"], 16000)
     """)])
 
 
@@ -140,7 +176,8 @@ def main() -> None:
     print("installing training dependencies (torch, openwakeword[full], etc.)...")
     pip_install("openwakeword", "torch", "torchaudio", "torchinfo", "torchmetrics",
                 "speechbrain", "audiomentations", "torch-audiomentations",
-                "acoustics", "scipy", "numpy", "tqdm", "mutagen", "pyyaml")
+                "acoustics", "scipy", "numpy", "tqdm", "mutagen", "pyyaml",
+                "datasets", "soundfile")
 
     if not args.skip_assets:
         fetch_assets(work, oww_repo)
