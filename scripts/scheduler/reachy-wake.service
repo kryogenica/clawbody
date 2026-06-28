@@ -1,0 +1,24 @@
+[Unit]
+Description=Reachy Mini Wake-Word Listener (mic -> power_on via control center)
+Documentation=https://github.com/pollen-robotics
+# Needs the daemon (owns the mic / dsnoop PCM) and the control center API.
+After=reachy-mini-daemon.service reachy-control.service
+Wants=reachy-control.service
+
+[Service]
+Type=simple
+User=pollen
+# ALSA reads ~/.asoundrc (defines the shared dsnoop capture device) via HOME.
+Environment=HOME=/home/pollen
+# Active wake model. Stand-in "hey marvin" (bundled) until the custom
+# "Reachy Wake up" model is trained; then repoint this to
+# /home/pollen/clawbody/scripts/scheduler/models/reachy_wake_up.onnx
+Environment=REACHY_WAKE_MODEL=/home/pollen/clawbody/scripts/scheduler/wake-venv/lib/python3.13/site-packages/openwakeword/resources/models/hey_marvin_v0.1.onnx
+Environment=REACHY_WAKE_THRESHOLD=0.70
+WorkingDirectory=/home/pollen/clawbody/scripts/scheduler
+ExecStart=/home/pollen/clawbody/scripts/scheduler/wake-venv/bin/python /home/pollen/clawbody/scripts/scheduler/wake_listener.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -64,3 +64,9 @@ uv.lock
 # Reachy control center runtime state (timers)
 scripts/scheduler/control_state.json
 scripts/scheduler/*.tmp
+
+# Wake-word listener: venv + (large/binary) model artifacts
+scripts/scheduler/wake-venv/
+scripts/scheduler/models/
+*.onnx
+*.tflite
