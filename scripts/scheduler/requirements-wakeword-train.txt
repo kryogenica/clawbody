@@ -7,7 +7,7 @@ espeak-phonemizer
 torchinfo
 torchmetrics
 numpy
-scipy
+scipy>=1.10,<1.17
 pyyaml
 audiomentations
 torch-audiomentations
@@ -17,4 +17,5 @@ acoustics
 deep-phonemizer==0.0.19
 scikit-learn
 requests
+onnx
 piper-sample-generator

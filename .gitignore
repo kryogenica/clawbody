@@ -28,6 +28,7 @@ wheels/
 
 # Virtual environments
 .venv/
+.venv-wakeword/
 venv/
 ENV/
 env/
@@ -70,3 +71,6 @@ scripts/scheduler/wake-venv/
 scripts/scheduler/models/
 *.onnx
 *.tflite
+
+# Wake-word training work dir (cloned repos, ~17GB features, generated clips)
+wakeword-training/

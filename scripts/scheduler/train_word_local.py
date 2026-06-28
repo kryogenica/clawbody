@@ -61,6 +61,60 @@ def clone_clean(repo_url: str, target_dir: Path) -> None:
     run(["git", "clone", "--depth", "1", repo_url, str(target_dir)])
 
 
+# Last onnxruntime-gpu release built against CUDA 12 (needs libcudart.so.12,
+# which the torch CUDA 12.x wheels ship). 1.23+ links against CUDA 13.
+ORT_GPU_VERSION = os.environ.get("WAKEWORD_ORT_GPU_VERSION", "1.22.0")
+
+
+def ensure_gpu_onnxruntime() -> None:
+    """Keep ONNX Runtime on the GPU (CUDA 12) build when a CUDA torch is present.
+
+    Installing openWakeWord (editable) pulls in the CPU `onnxruntime` as a
+    dependency. Because `onnxruntime` and `onnxruntime-gpu` share the same
+    `onnxruntime/` package directory, a plain "uninstall onnxruntime" can leave
+    `onnxruntime-gpu` hollow (its files removed but still "satisfied"). To get a
+    clean state we uninstall BOTH and force-reinstall the pinned GPU build.
+    This enables the CUDAExecutionProvider used for feature extraction.
+    """
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if not torch.cuda.is_available():
+        return
+
+    try:
+        import onnxruntime as ort
+
+        if (
+            getattr(ort, "__file__", None)
+            and "CUDAExecutionProvider" in ort.get_available_providers()
+        ):
+            return
+    except Exception:
+        pass
+
+    print("Re-installing onnxruntime-gpu (CUDA 12) for GPU feature extraction...")
+    subprocess.run(
+        [sys.executable, "-m", "pip", "uninstall", "-y", "onnxruntime", "onnxruntime-gpu"],
+        check=False,
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            "--no-cache-dir",
+            "--no-deps",
+            f"onnxruntime-gpu=={ORT_GPU_VERSION}",
+        ],
+        check=True,
+    )
+
+
 def ensure_openwakeword_resources(openwakeword_dir: Path) -> None:
     if str(openwakeword_dir) not in sys.path:
         sys.path.insert(0, str(openwakeword_dir))
@@ -233,7 +287,7 @@ def augment_synthetic(raw_dir: Path, work: Path) -> Path:
     return out_dir
 
 
-def write_config(work: Path, piper_repo: Path) -> Path:
+def write_config(work: Path, piper_repo: Path, steps: int = 50000) -> Path:
     config_path = work / f"{MODEL_NAME}.yaml"
     out_a = work / "audioset_16k"
     out_f = work / "fma"
@@ -265,7 +319,7 @@ def write_config(work: Path, piper_repo: Path) -> Path:
         },
         "model_type": "dnn",
         "layer_size": 32,
-        "steps": 50000,
+        "steps": steps,
         "max_negative_weight": 1500,
         "target_false_positives_per_hour": 0.2,
         "target_accuracy": 0.7,
@@ -280,7 +334,64 @@ def write_config(work: Path, piper_repo: Path) -> Path:
     return config_path
 
 
-def run_training_stages(openwakeword_dir: Path, config_path: Path) -> None:
+def _train_prelude() -> str:
+    """Python preamble injected before openWakeWord train.py runs in a subprocess."""
+    return """
+import argparse
+import types
+
+import piper_train.vits.models
+import soundfile as sf
+import torch
+import torchaudio
+
+torch.serialization.add_safe_globals([
+    piper_train.vits.models.SynthesizerTrn,
+    piper_train.vits.models.TextEncoder,
+])
+
+if not hasattr(torchaudio, "info"):
+    torchaudio.info = lambda path, format=None, buffer_size=4096, backend=None: types.SimpleNamespace(
+        sample_rate=sf.info(path).samplerate,
+        num_frames=sf.info(path).frames,
+        num_channels=sf.info(path).channels,
+        bits_per_sample=0,
+        encoding=getattr(sf.info(path), "subtype", "UNKNOWN"),
+    )
+
+# torchaudio 2.9+ defaults to torchcodec for load(); use soundfile instead.
+torchaudio.load = lambda path, *args, **kwargs: (
+    lambda data, sr: (torch.from_numpy(data.T).float(), sr)
+)(*sf.read(path, always_2d=True))
+
+# torch 2.9+ defaults torch.onnx.export to the dynamo exporter (needs onnxscript).
+# Force the legacy TorchScript exporter (needs onnx).
+_oe = torch.onnx.export
+torch.onnx.export = lambda *a, **k: _oe(*a, **{**{"dynamo": False}, **k})
+
+# openWakeWord argparse uses default="False" (string) for store_true flags; the
+# string "False" is truthy, so --convert_to_tflite runs even when omitted.
+_ap_parse = argparse.ArgumentParser.parse_args
+
+def _fix_oww_flags(ns):
+    for flag in (
+        "generate_clips",
+        "augment_clips",
+        "train_model",
+        "convert_to_tflite",
+        "overwrite",
+    ):
+        if getattr(ns, flag, None) == "False":
+            setattr(ns, flag, False)
+    return ns
+
+argparse.ArgumentParser.parse_args = (
+    lambda self, args=None, namespace=None: _fix_oww_flags(_ap_parse(self, args, namespace))
+)
+"""
+
+
+def run_training_stages(openwakeword_dir: Path, config_path: Path, stages=None) -> None:
     train_dir = openwakeword_dir / "openwakeword"
     train_py = train_dir / "train.py"
     piper_repo = config_path.parent / "piper-sample-generator"
@@ -292,29 +403,22 @@ def run_training_stages(openwakeword_dir: Path, config_path: Path) -> None:
     )
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
-    allowlist_logic = (
-        "import torch, types; import piper_train.vits.models; "
-        "torch.serialization.add_safe_globals([piper_train.vits.models.SynthesizerTrn, "
-        "piper_train.vits.models.TextEncoder]); "
-        "import torchaudio; import soundfile as sf; "
-        "hasattr(torchaudio, 'info') or setattr(torchaudio, 'info', "
-        "(lambda path, format=None, buffer_size=4096, backend=None: "
-        "types.SimpleNamespace(sample_rate=sf.info(path).samplerate, "
-        "num_frames=sf.info(path).frames, num_channels=sf.info(path).channels, "
-        "bits_per_sample=0, encoding=getattr(sf.info(path), 'subtype', 'UNKNOWN')))); "
-    )
+    prelude = _train_prelude()
 
-    for flag, extra in (
-        ("--generate_clips", []),
-        ("--augment_clips", ["--overwrite"]),
-        ("--train_model", []),
-    ):
+    if stages is None:
+        stages = [
+            ("--generate_clips", []),
+            ("--augment_clips", ["--overwrite"]),
+            ("--train_model", []),
+        ]
+
+    for flag, extra in stages:
         argv = ["train.py", "--training_config", str(config_path), flag, *extra]
         cmd = [
             sys.executable,
             "-u",
             "-c",
-            f"{allowlist_logic} import sys; sys.argv={argv!r}; exec(open('{train_py}').read())",
+            prelude + f"import sys; sys.argv={argv!r}; exec(open({str(train_py)!r}).read())",
         ]
         print(f"\nRunning training stage: {flag}")
         run(cmd, cwd=train_dir, env=env)
@@ -343,6 +447,25 @@ def main() -> None:
         help="Stop after preparing data + config.",
     )
     parser.add_argument("--audioset-clips", type=int, default=400)
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=50000,
+        help="Training steps for sequence 1 (sequences 2 and 3 use steps//10 each). "
+        "Use a small value like 1000 for fast end-to-end testing.",
+    )
+    parser.add_argument(
+        "--reuse-features",
+        action="store_true",
+        help="Skip clip generation and augmentation; only run model training + ONNX "
+        "export using the existing feature .npy files.",
+    )
+    parser.add_argument(
+        "--skip-setup",
+        action="store_true",
+        help="Skip re-cloning/reinstalling openWakeWord and feature downloads when the "
+        "openWakeWord directory already exists (faster iteration).",
+    )
     args = parser.parse_args()
 
     work = Path(args.work_dir).resolve()
@@ -351,28 +474,42 @@ def main() -> None:
     openwakeword_dir = work / "openWakeWord"
     print(f"Using work dir: {work}")
 
-    clone_clean("https://github.com/dscripka/openWakeWord.git", openwakeword_dir)
-    piper_repo = prepare_piper_sample_generator(work)
+    if args.skip_setup and openwakeword_dir.exists():
+        print("Skipping setup; reusing existing openWakeWord + piper repos.")
+        piper_repo = work / "piper-sample-generator"
+    else:
+        clone_clean("https://github.com/dscripka/openWakeWord.git", openwakeword_dir)
+        piper_repo = prepare_piper_sample_generator(work)
 
-    run([sys.executable, "-m", "pip", "install", "-e", str(openwakeword_dir)])
-    ensure_openwakeword_resources(openwakeword_dir)
-    download_feature_files(work)
+        run([sys.executable, "-m", "pip", "install", "-e", str(openwakeword_dir)])
+        ensure_gpu_onnxruntime()
+        ensure_openwakeword_resources(openwakeword_dir)
+        download_feature_files(work)
 
-    if not args.skip_background:
-        collect_audioset_background(work, n_clips=args.audioset_clips)
+    if not args.reuse_features:
+        if not args.skip_background:
+            collect_audioset_background(work, n_clips=args.audioset_clips)
 
-    if not args.skip_tts:
-        try:
-            raw_dir = generate_raw_synthetic(work, piper_repo / "models")
-        except HfHubHTTPError as exc:
-            raise RuntimeError(f"Could not download Piper voices from Hugging Face: {exc}") from exc
-        augment_synthetic(raw_dir, work)
+        if not args.skip_tts:
+            try:
+                raw_dir = generate_raw_synthetic(work, piper_repo / "models")
+            except HfHubHTTPError as exc:
+                raise RuntimeError(f"Could not download Piper voices from Hugging Face: {exc}") from exc
+            augment_synthetic(raw_dir, work)
 
-    config_path = write_config(work, piper_repo)
+    config_path = write_config(work, piper_repo, steps=args.steps)
     print(f"Training config written to: {config_path}")
 
     if not args.skip_train:
-        run_training_stages(openwakeword_dir, config_path)
+        if args.reuse_features:
+            stages = [("--train_model", [])]
+        else:
+            stages = [
+                ("--generate_clips", []),
+                ("--augment_clips", ["--overwrite"]),
+                ("--train_model", []),
+            ]
+        run_training_stages(openwakeword_dir, config_path, stages)
 
     model_path = work / MODEL_NAME / f"{MODEL_NAME}.onnx"
     if model_path.exists():
